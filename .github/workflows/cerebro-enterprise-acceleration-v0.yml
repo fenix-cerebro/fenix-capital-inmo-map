@@ -1,0 +1,178 @@
+name: CEREBRO Enterprise Acceleration V0
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'cerebro/**'
+      - '.github/copilot-instructions.md'
+      - '.github/agents/**'
+      - '.github/workflows/cerebro-enterprise-acceleration-v0.yml'
+      - 'docs/CEREBRO_GITHUB_ENTERPRISE_ACCELERATION_V0.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cerebro-enterprise-accel-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy-gate:
+    name: Policy gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Validate paid Enterprise acceleration policy
+        run: >-
+          node -e "const p=require('./cerebro/config/github-enterprise-execution.v1.json');
+          if(p.status!=='PREPROD_CANDIDATE') process.exit(1);
+          if(p.verified_platform_limits.standard_runner_concurrent_jobs_baseline_without_enterprise_increase!==20) process.exit(1);
+          if(p.verified_platform_limits.paid_enterprise_standard_runner_documented_ceiling!==500) process.exit(1);
+          if(p.verified_platform_limits.live_enterprise_runner_concurrent_jobs_limit!==360) process.exit(1);
+          if(p.verified_platform_limits.paid_enterprise_standard_runner_macos_concurrent_jobs_ceiling!==50) process.exit(1);
+          if(p.verified_platform_limits.matrix_jobs_per_workflow_run_ceiling!==256) process.exit(1);
+          if(p.parallelism.current_live_enterprise_parallelism_cap!==360) process.exit(1);
+          if(p.parallelism.enterprise_acceleration_test_parallelism!==128) process.exit(1);
+          if(p.workflow_policy.production_deploy_from_acceleration_workflow!==false) process.exit(1);
+          if(p.workflow_policy.write_external_systems!==false) process.exit(1);
+          if(p.workflow_policy.use_actions_as_permanent_transactional_runtime!==false) process.exit(1);
+          if(p.copilot_policy.copilot_is_runtime_dependency!==false) process.exit(1);
+          if(p.copilot_policy.automerge_prod!==false) process.exit(1);
+          if(p.entitlement_gate.enterprise_organization_verified_for_canonical_repo!==true) process.exit(1);
+          if(p.entitlement_gate.enterprise_actions_concurrency_entitlement_verified!==true) process.exit(1);
+          if(p.entitlement_gate.enterprise_account_state!=='PAID') process.exit(1);
+          if(p.entitlement_gate.global_fanout_enabled!==true) process.exit(1);
+          if(p.entitlement_gate.global_500_topology_prepared!==true) process.exit(1);
+          if(p.entitlement_gate.global_500_fanout_enabled!==false) process.exit(1);
+          if(p.entitlement_gate.canonical_repository!=='fenix-cerebro/fenix-capital-inmo-map') process.exit(1);
+          console.log('CEREBRO GitHub acceleration policy GREEN / paid Enterprise / live cap 360 / macOS 50 / documented 500 topology prepared');"
+
+  discover-tests:
+    name: Discover and shard independent test files
+    needs: policy-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+      count: ${{ steps.discover.outputs.count }}
+      shard_count: ${{ steps.discover.outputs.shard_count }}
+      target_cap: ${{ steps.discover.outputs.target_cap }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: discover
+        name: Build adaptive paid-Enterprise test-shard matrix
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const policy = require('./cerebro/config/github-enterprise-execution.v1.json');
+          const dir = path.join(process.cwd(), 'cerebro', 'tests');
+          const tests = fs.readdirSync(dir).filter((name) => name.endsWith('.test.mjs')).sort().map((name) => `cerebro/tests/${name}`);
+          if (tests.length === 0) throw new Error('No CEREBRO test files discovered');
+          const liveCap = policy.parallelism.current_live_enterprise_parallelism_cap;
+          const configuredTarget = policy.parallelism.enterprise_acceleration_test_parallelism;
+          if (liveCap !== 360) throw new Error('LIVE_ENTERPRISE_CAP_MISMATCH');
+          if (configuredTarget !== 128) throw new Error('ENTERPRISE_TEST_TARGET_MISMATCH');
+          const targetCap = process.env.EVENT_NAME === 'pull_request' ? 20 : Math.min(configuredTarget, liveCap);
+          const targetShards = Math.min(targetCap, tests.length);
+          const shards = Array.from({ length: targetShards }, (_, shard) => ({ shard, tests: [] }));
+          tests.forEach((test, index) => shards[index % targetShards].tests.push(test));
+          const include = shards.filter((entry) => entry.tests.length > 0).map((entry) => ({shard:entry.shard,count:entry.tests.length,tests_json:JSON.stringify(entry.tests)}));
+          if (include.length > targetCap) throw new Error('Adaptive shard cap exceeded');
+          if (include.length > 256) throw new Error('Matrix exceeds GitHub 256-job ceiling');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify({include})}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `count=${tests.length}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `shard_count=${include.length}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `target_cap=${targetCap}\n`);
+          NODE
+
+  parallel-tests:
+    name: Shard ${{ matrix.shard }} · ${{ matrix.count }} test files
+    needs: discover-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 128
+      matrix: ${{ fromJSON(needs.discover-tests.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Run shard with dependency-on-demand fallback
+        env:
+          TESTS_JSON: ${{ matrix.tests_json }}
+        shell: bash
+        run: |
+          node <<'NODE'
+          const {spawnSync} = require('child_process');
+          const tests = JSON.parse(process.env.TESTS_JSON);
+          function runTests(){const r=spawnSync(process.execPath,['--test',...tests],{encoding:'utf8',maxBuffer:64*1024*1024});if(r.stdout)process.stdout.write(r.stdout);if(r.stderr)process.stderr.write(r.stderr);return r;}
+          let result=runTests();
+          if((result.status??1)===0)process.exit(0);
+          const diagnostic=`${result.stdout||''}\n${result.stderr||''}`;
+          if(!/ERR_MODULE_NOT_FOUND|Cannot find package/.test(diagnostic))process.exit(result.status??1);
+          const install=spawnSync('npm',['ci','--ignore-scripts','--no-audit','--no-fund'],{stdio:'inherit'});
+          if((install.status??1)!==0)process.exit(install.status??1);
+          result=runTests();process.exit(result.status??1);
+          NODE
+
+  old-vs-new-regression:
+    name: OLD vs NEW · full canonical regression
+    needs: [discover-tests, parallel-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - working-directory: cerebro
+        run: npm run validate
+      - working-directory: cerebro
+        run: npm test
+      - name: Record acceleration evidence
+        run: |
+          printf '%s\n' \
+            "status=GREEN" \
+            "discovered_test_files=${{ needs.discover-tests.outputs.count }}" \
+            "parallel_shards=${{ needs.discover-tests.outputs.shard_count }}" \
+            "target_cap=${{ needs.discover-tests.outputs.target_cap }}" \
+            "parallel_matrix_ceiling=256" \
+            "live_enterprise_runner_cap=360" \
+            "live_macos_runner_cap=50" \
+            "documented_enterprise_platform_ceiling=500" \
+            "prod_deploy=false" \
+            "external_writes=false" \
+            > /tmp/cerebro-enterprise-acceleration-v0.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cerebro-enterprise-acceleration-v0-evidence
+          path: /tmp/cerebro-enterprise-acceleration-v0.txt
+          retention-days: 14
+
+  acceptance:
+    name: Acceleration V0 acceptance
+    needs: [discover-tests, parallel-tests, old-vs-new-regression]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          echo "CEREBRO Enterprise Acceleration V0 GREEN"
+          echo "Live GitHub runner cap: 360"
+          echo "Live macOS cap: 50"
+          echo "Documented Enterprise ceiling: 500; single matrix ceiling: 256."
+          echo "500 topology remains prepared; physical 500 awaits live runner limit >=500."
+          echo "No PROD deployment. No external writes. No service retirement."

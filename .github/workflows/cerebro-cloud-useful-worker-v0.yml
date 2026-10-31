@@ -1,0 +1,85 @@
+name: CEREBRO CLOUD USEFUL WORKER V0
+run-name: CEREBRO USEFUL ${{ inputs.lane }} · P${{ inputs.pass }} · PREPROD deterministic
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: 'Deterministic useful-work lane 0..67'
+        required: true
+        type: string
+      pass:
+        description: 'Governed useful-work phase 0..7'
+        required: false
+        default: '0'
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cerebro-useful-worker-v0-${{ inputs.lane }}
+  cancel-in-progress: false
+
+jobs:
+  useful-work:
+    name: USEFUL-${{ inputs.lane }}-P${{ inputs.pass }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      CEREBRO_SUPERVISOR_ENV: PREPROD
+      CEREBRO_INITIAL_CONCURRENCY: '48'
+      CEREBRO_MAX_CONCURRENCY: '68'
+      CEREBRO_MAX_PER_COMPANY: '68'
+      CEREBRO_MAX_DEEPSEEK_CONCURRENCY: '8'
+      CEREBRO_MAX_REPO_WRITE_CONCURRENCY: '1'
+      CEREBRO_ALLOW_PAID_FANOUT: 'NO'
+      CEREBRO_PROD_WRITE: 'false'
+      CEREBRO_TRADING_ACCESS: 'false'
+    steps:
+      - name: Checkout immutable execution revision
+        uses: actions/checkout@v4
+
+      - name: Enforce PREPROD zero-paid-AI guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CEREBRO_SUPERVISOR_ENV" = "PREPROD"
+          test "$CEREBRO_ALLOW_PAID_FANOUT" = "NO"
+          test "$CEREBRO_PROD_WRITE" = "false"
+          test "$CEREBRO_TRADING_ACCESS" = "false"
+          test "$CEREBRO_INITIAL_CONCURRENCY" = "48"
+          test "$CEREBRO_MAX_CONCURRENCY" = "68"
+          for value in "${{ inputs.lane }}" "${{ inputs.pass }}"; do
+            case "$value" in ''|*[!0-9]*) exit 2 ;; esac
+          done
+          test "${{ inputs.lane }}" -ge 0 && test "${{ inputs.lane }}" -le 67
+          test "${{ inputs.pass }}" -ge 0 && test "${{ inputs.pass }}" -le 7
+
+      - name: Execute bounded useful work
+        run: node cerebro/runtime/deterministic-useful-work-worker-v0.mjs --lane=${{ inputs.lane }} --pass=${{ inputs.pass }}
+
+      - name: Publish inspectable evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: cerebro-useful-${{ inputs.lane }}-p${{ inputs.pass }}-${{ github.run_id }}
+          path: |
+            artifacts/useful-work-v0/**
+            artifacts/max-fanout-v1/**
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Immediate useful refill for this lane
+        if: success() && inputs.pass != '7'
+        shell: bash
+        run: |
+          set -euo pipefail
+          next=$(( ${{ inputs.pass }} + 1 ))
+          gh api --method POST "/repos/${GH_REPO}/actions/workflows/cerebro-cloud-useful-worker-v0.yml/dispatches" \
+            -f ref=main \
+            -f "inputs[lane]=${{ inputs.lane }}" \
+            -f "inputs[pass]=${next}"
+          echo "refilled_lane=${{ inputs.lane }} next_pass=${next}" >> "$GITHUB_STEP_SUMMARY"

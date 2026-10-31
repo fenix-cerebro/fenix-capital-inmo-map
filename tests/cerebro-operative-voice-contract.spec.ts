@@ -5,14 +5,19 @@ import path from 'node:path';
 const root=process.cwd();
 const read=(file:string)=>fs.readFileSync(path.join(root,file),'utf8');
 
-test('OPERATIVA Hablar still delegates to the mounted canonical V0 voice control',async()=>{
- const operative=read('src/CerebroOperativeConsole.tsx');
+test('JARVIS Work exposes the canonical V0 voice control directly, without an Operativa proxy',async()=>{
+ const shell=read('src/CerebroConsoleShell.tsx');
  const host=read('src/CerebroConsoleHost.tsx');
- expect(host).toContain("<div className={`cerebro-host-v0 ${view==='V0'?'is-visible':'is-hidden'}`}");
- expect(host).toContain('<CerebroConsoleShell/>');
- expect(operative).toContain("document.querySelector<HTMLButtonElement>('.cerebro-host-v0 .cerebro-voice-main')");
- expect(operative).toContain('button.click()');
- expect(operative).toContain("snapshot.voiceActive?'Finalizar conversación por voz':'Hablar con CEREBRO'");
+ const work=read('src/CerebroJarvisWorkConsole.tsx');
+ expect(host).toContain('<CerebroJarvisWorkConsole');
+ expect(host).toContain('hidden={browser}');
+ expect(host).not.toContain('CerebroOperativeConsole');
+ expect(work).toContain("import CerebroConsoleShell from './CerebroConsoleShell';");
+ expect(work).toContain('<CerebroConsoleShell/>');
+ expect(work).not.toContain('querySelector');
+ expect(shell).toContain('className="cerebro-voice-main"');
+ expect(shell).toContain('onClick={toggleVoiceSession}');
+ expect(shell).toContain("voiceSessionActive?'Finalizar conversación':'Hablar con CEREBRO'");
 });
 
 test('canonical V0 implements the required continuous listen → chat → TTS → re-listen loop',async()=>{

@@ -1,0 +1,186 @@
+name: CEREBRO Global Capacity Controller V1 CI
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/cerebro-continuous-work-factory-v0.yml'
+      - '.github/workflows/cerebro-cloud-useful-continuous-worker-v1.yml'
+      - '.github/workflows/cerebro-portfolio-priority-sustained-v1.yml'
+      - '.github/workflows/cerebro-neuronal-superparallel-v1.yml'
+      - '.github/workflows/cerebro-global-capacity-heartbeat-v1.yml'
+      - '.github/workflows/cerebro-global-capacity-controller-v1-ci.yml'
+      - 'cerebro/runtime/continuous-useful-work-factory-v0.mjs'
+      - 'cerebro/runtime/mission-derived-useful-work-v1.mjs'
+      - 'cerebro/runtime/portfolio-priority-sustained-v1.mjs'
+      - 'cerebro/tests/continuous-useful-work-factory-v0.test.mjs'
+      - 'cerebro/tests/mission-derived-useful-work-v1.test.mjs'
+      - 'cerebro/tests/portfolio-priority-sustained-v1.test.mjs'
+      - 'cerebro/tests/neuronal-superparallel-4cpu-workflow-v1.test.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: macos-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Syntax and topology tests
+        run: |
+          node --check cerebro/runtime/continuous-useful-work-factory-v0.mjs
+          node --check cerebro/runtime/mission-derived-useful-work-v1.mjs
+          node --check cerebro/runtime/portfolio-priority-sustained-v1.mjs
+          node --test cerebro/tests/continuous-useful-work-factory-v0.test.mjs
+          node --test cerebro/tests/mission-derived-useful-work-v1.test.mjs
+          node --test cerebro/tests/portfolio-priority-sustained-v1.test.mjs
+          if [ -f cerebro/tests/neuronal-superparallel-4cpu-workflow-v1.test.mjs ]; then node --test cerebro/tests/neuronal-superparallel-4cpu-workflow-v1.test.mjs; fi
+
+      - name: macOS loan-lane runtime smoke
+        shell: bash
+        env:
+          CEREBRO_SUPERVISOR_ENV: PREPROD
+          CEREBRO_ALLOW_PAID_FANOUT: 'NO'
+          CEREBRO_PROD_WRITE: 'false'
+          CEREBRO_TRADING_ACCESS: 'false'
+          CEREBRO_PORTFOLIO_SUSTAINED_WRITE_MODE: rolling
+          CEREBRO_PORTFOLIO_SUSTAINED_OUT_DIR: artifacts/portfolio-priority-sustained-v1
+        run: |
+          set -euo pipefail
+          node cerebro/runtime/portfolio-priority-sustained-v1.mjs --lane=232 --cycle=0 --slot=0
+          test -d artifacts/portfolio-priority-sustained-v1
+
+      - name: Verify RAMP350 total contract and dynamic NEURONAL reservation
+        shell: bash
+        run: |
+          set -euo pipefail
+          controller='.github/workflows/cerebro-continuous-work-factory-v0.yml'
+          heartbeat='.github/workflows/cerebro-global-capacity-heartbeat-v1.yml'
+          maintenance='.github/workflows/cerebro-cloud-useful-continuous-worker-v1.yml'
+          priority='.github/workflows/cerebro-portfolio-priority-sustained-v1.yml'
+          neuronal='.github/workflows/cerebro-neuronal-superparallel-v1.yml'
+
+          grep -q "USEFUL_POOL: '350'" "$controller"
+          grep -q "CONTROL_RESERVE: '10'" "$controller"
+          grep -q "ENTERPRISE_CAP: '360'" "$controller"
+          grep -q "BACKGROUND_MAX_USEFUL: '350'" "$controller"
+          grep -q "MAINTENANCE_RAMP_LANES: '68'" "$controller"
+          grep -q "PRIORITY_MAX_LANES: '282'" "$controller"
+          grep -q "PORTFOLIO_BASE_LANES: '182'" "$controller"
+          grep -q "PORTFOLIO_LOAN_LANES: '100'" "$controller"
+          grep -q "NEURONAL_MAX_PHYSICAL: '25'" "$controller"
+          grep -q 'test $((USEFUL_POOL + CONTROL_RESERVE)) -eq "$ENTERPRISE_CAP"' "$controller"
+          grep -q 'test $((MAINTENANCE_RAMP_LANES + PRIORITY_MAX_LANES)) -eq "$BACKGROUND_MAX_USEFUL"' "$controller"
+          grep -q 'priority_target=$((PRIORITY_MAX_LANES - NEURONAL_MAX_PHYSICAL))' "$controller"
+          grep -q 'actions/workflows/${neuronal}/runs?per_page=30' "$controller"
+          grep -q "neuronal_probe_status='GREEN'" "$controller"
+          grep -q "neuronal_active_ids='UNKNOWN_FAIL_CLOSED'" "$controller"
+          grep -q 'neuronal_probe_api_calls=1' "$controller"
+          grep -q 'total_useful_target=$((background_target + neuronal_reserved))' "$controller"
+          grep -q 'test "$total_useful_target" -eq "$USEFUL_POOL"' "$controller"
+          grep -q 'test $((total_useful_target + CONTROL_RESERVE)) -eq "$ENTERPRISE_CAP"' "$controller"
+          grep -q "capacity_mode='RAMP350_TOTAL'" "$controller"
+          grep -q 'cancelled_neuronal_return_loans' "$controller"
+          grep -q 'api_snapshot_calls_max=21' "$controller"
+          grep -q 'worker_pressure_reads=0' "$controller"
+          grep -q 'controller_self_rearmed=false' "$controller"
+          grep -q 'controller_reconcile_cadence=5m_schedule_plus_push_plus_manual' "$controller"
+          ! grep -q 'actions/workflows/cerebro-continuous-work-factory-v0.yml/dispatches' "$controller"
+
+          # CONTROL_PRESSURE must consume the pre-reserved 10 control slots first.
+          # It may trim only the excess over that reserve and never drain the whole queue.
+          grep -q 'if \[ "$critical_queued_count" -gt "$CONTROL_RESERVE" \]' "$controller"
+          grep -q 'pressure_cancel_budget=$((critical_queued_count - CONTROL_RESERVE))' "$controller"
+          grep -q "capacity_mode='CONTROL_PRESSURE_BOUNDED'" "$controller"
+          grep -q '\[ "$cancelled_background_queue_runs" -lt "$pressure_cancel_budget" \] || break' "$controller"
+          grep -q 'pressure_cancel_budget=$pressure_cancel_budget' "$controller"
+          grep -q 'control_pressure_policy=reserve10_then_cancel_excess_only' "$controller"
+          ! grep -q 'if \[ "$critical_queued_count" -gt 0 \]; then critical_pressure=true' "$controller"
+
+          grep -q 'name: CEREBRO Global Capacity Heartbeat V1' "$heartbeat"
+          grep -q 'runs-on: macos-latest' "$heartbeat"
+          grep -q "HEARTBEAT_SECONDS: '240'" "$heartbeat"
+          grep -q "CEREBRO_SUPERVISOR_ENV: PREPROD" "$heartbeat"
+          grep -q "CEREBRO_ALLOW_PAID_FANOUT: 'NO'" "$heartbeat"
+          grep -q "CEREBRO_PROD_WRITE: 'false'" "$heartbeat"
+          grep -q "CEREBRO_TRADING_ACCESS: 'false'" "$heartbeat"
+          grep -Fq "cron: '*/15 * * * *'" "$heartbeat"
+          grep -q "controller='cerebro-continuous-work-factory-v0.yml'" "$heartbeat"
+          grep -q 'actions/workflows/${controller}/runs?per_page=20' "$heartbeat"
+          grep -q 'actions/workflows/${controller}/dispatches' "$heartbeat"
+          grep -q "heartbeat='cerebro-global-capacity-heartbeat-v1.yml'" "$heartbeat"
+          grep -q 'actions/workflows/${heartbeat}/runs?per_page=20' "$heartbeat"
+          grep -q 'actions/workflows/${heartbeat}/dispatches' "$heartbeat"
+          grep -q 'current_run=' "$heartbeat"
+          grep -q 'sleep "$HEARTBEAT_SECONDS"' "$heartbeat"
+          grep -q 'other_heartbeat_active' "$heartbeat"
+          grep -q 'fail_closed_on_probe_error=true' "$heartbeat"
+          grep -q 'cadence_source=self_rearm_plus_schedule_backup' "$heartbeat"
+          grep -q 'control_slots_consumed=1' "$heartbeat"
+          grep -q 'additional_cost_eur=0' "$heartbeat"
+
+          for critical in \
+            cerebro-enterprise-acceleration-v0.yml \
+            cerebro-global-capacity-controller-v1-ci.yml \
+            cerebro-auto001-preprod-patch-executor-v0.yml \
+            cerebro-auto001-prod-closure-v1.yml \
+            cerebro-governed-promotion-v1.yml \
+            cerebro-fact001-repair-worker-factory-v1.yml \
+            cerebro-app001-preprod-physical-qa-v1.yml; do
+            grep -q "$critical" "$controller"
+          done
+
+          for file in "$controller" "$maintenance" "$priority" "$heartbeat"; do
+            grep -q "'HTTP 500'" "$file"
+            grep -q "'HTTP 502'" "$file"
+            grep -q "'HTTP 503'" "$file"
+            grep -q "'HTTP 504'" "$file"
+            grep -q 'attempt in 1 2 3 4' "$file"
+          done
+          for file in "$controller" "$maintenance" "$priority"; do
+            grep -q 'dispatch_with_transient_retry' "$file"
+          done
+          grep -q 'dispatch_non_transient_retry=false' "$controller"
+          grep -q 'in_progress_background_cancelled=false' "$controller"
+
+          grep -q "CEREBRO_MAINTENANCE_INNER_PARALLELISM: '4'" "$maintenance"
+          grep -q "CEREBRO_PORTFOLIO_INNER_PARALLELISM: '4'" "$priority"
+          grep -q "CEREBRO_PORTFOLIO_MAX_LANES: '282'" "$priority"
+          grep -q "CEREBRO_PORTFOLIO_MACOS_LOAN_START: '232'" "$priority"
+          grep -q "runs-on:.*macos-latest.*ubuntu-latest" "$priority"
+          grep -q 'test $((CEREBRO_PORTFOLIO_MAX_LANES - CEREBRO_PORTFOLIO_MACOS_LOAN_START)) -eq 50' "$priority"
+          grep -q 'runner_pool=' "$priority"
+          grep -q 'Loan lanes return authority to global controller' "$priority"
+          if [ -f cerebro/tests/neuronal-superparallel-4cpu-workflow-v1.test.mjs ]; then
+            grep -q 'max-parallel: 25' "$neuronal"
+            grep -q 'submission_ids' "$neuronal"
+          fi
+
+          ! grep -q "CEREBRO_ALLOW_PAID_FANOUT: 'YES'" "$controller" "$maintenance" "$priority" "$heartbeat"
+          ! grep -q "CEREBRO_PROD_WRITE: 'true'" "$controller" "$maintenance" "$priority" "$neuronal" "$heartbeat"
+          ! grep -q "CEREBRO_TRADING_ACCESS: 'true'" "$controller" "$maintenance" "$priority" "$neuronal" "$heartbeat"
+
+      - name: Acceptance summary
+        run: |
+          echo 'enterprise entitlement=360 physical jobs total'
+          echo 'useful target=350; control reserve=10'
+          echo 'ramp stage 5=RAMP350_TOTAL'
+          echo 'background max=350 when NEURONAL idle'
+          echo 'background target=325 when NEURONAL parent active'
+          echo 'neuronal conservative reservation=25 physical'
+          echo 'neuronal detection=direct workflow endpoint, fail-closed on uncertainty'
+          echo 'total useful target always=350'
+          echo 'maintenance lanes=68'
+          echo 'priority max lanes=282 (182 base + 100 loan)'
+          echo 'priority macOS overflow=50 loan lanes 232..281; same 350 useful total'
+          echo 'control pressure=10 reserved slots first; cancel only overflow beyond reserve'
+          echo 'worker critical-pressure API scans=0'
+          echo 'transient dispatch retry=HTTP 500/502/503/504 max4 only'
+          echo 'controller reconciliation=heartbeat 240s plus schedule/push/manual backup'
+          echo 'heartbeat runner=macos control slot; self-rearm deduplicated and fail-closed'
+          echo 'critical capacity CI runner=macos control plane'
+          echo 'additional cost=0 EUR'
