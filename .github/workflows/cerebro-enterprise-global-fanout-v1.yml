@@ -1,0 +1,193 @@
+name: CEREBRO Enterprise Global Fanout V1
+
+on:
+  workflow_dispatch:
+    inputs:
+      units:
+        description: 'Useful PREPROD Mission DAG units buffered in this wave. Physical execution remains bounded by the verified live 360-runner cap.'
+        required: false
+        default: '360'
+        type: string
+      offset:
+        description: 'Deterministic Mission DAG offset for the next non-overlapping wave.'
+        required: false
+        default: '0'
+        type: string
+  pull_request:
+    paths:
+      - '28_MACROFRENTES.md'
+      - 'cerebro/registry/jarvis-project-registry.v1.json'
+      - 'cerebro/runtime/mission-recursive-decomposer-v1.mjs'
+      - 'cerebro/runtime/mission-derived-useful-work-v1.mjs'
+      - 'cerebro/runtime/mission-real-work-router-v1.mjs'
+      - 'cerebro/runtime/mission-fact001-scaffold-bridge-v1.mjs'
+      - 'cerebro/runtime/fact001-request-runner.mjs'
+      - 'cerebro/runtime/enterprise-global-fanout-v1.mjs'
+      - 'cerebro/tests/enterprise-global-fanout-v1.test.mjs'
+      - 'cerebro/tests/enterprise-global-autostart-v1.test.mjs'
+      - 'cerebro/config/github-enterprise-execution.v1.json'
+      - '.github/workflows/cerebro-enterprise-global-fanout-v1.yml'
+      - 'docs/CEREBRO_ENTERPRISE_GLOBAL_FANOUT_V1.md'
+  push:
+    branches: [main]
+    paths:
+      - '28_MACROFRENTES.md'
+      - 'cerebro/registry/jarvis-project-registry.v1.json'
+      - 'cerebro/runtime/mission-recursive-decomposer-v1.mjs'
+      - 'cerebro/runtime/mission-derived-useful-work-v1.mjs'
+      - 'cerebro/runtime/mission-real-work-router-v1.mjs'
+      - 'cerebro/runtime/mission-fact001-scaffold-bridge-v1.mjs'
+      - 'cerebro/runtime/fact001-request-runner.mjs'
+      - 'cerebro/runtime/enterprise-global-fanout-v1.mjs'
+      - 'cerebro/tests/enterprise-global-fanout-v1.test.mjs'
+      - 'cerebro/tests/enterprise-global-autostart-v1.test.mjs'
+      - 'cerebro/config/github-enterprise-execution.v1.json'
+      - '.github/workflows/cerebro-enterprise-global-fanout-v1.yml'
+      - 'docs/CEREBRO_ENTERPRISE_GLOBAL_FANOUT_V1.md'
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: cerebro-enterprise-global-fanout-v1-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.offset || github.event_name == 'pull_request' && github.event.pull_request.number || 'validation' }}
+  cancel-in-progress: false
+
+env:
+  CEREBRO_SUPERVISOR_ENV: PREPROD
+  CEREBRO_PROD_WRITE: 'false'
+  CEREBRO_TRADING_ACCESS: 'false'
+  CEREBRO_ALLOW_PAID_FANOUT: 'NO'
+
+jobs:
+  plan:
+    name: Governed global fanout plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      matrix_a: ${{ steps.plan.outputs.matrix_a }}
+      matrix_b: ${{ steps.plan.outputs.matrix_b }}
+      matrix_a_count: ${{ steps.plan.outputs.matrix_a_count }}
+      matrix_b_count: ${{ steps.plan.outputs.matrix_b_count }}
+      planned_units: ${{ steps.plan.outputs.planned_units }}
+      effective_cap: ${{ steps.plan.outputs.effective_cap }}
+      queue_buffer_cap: ${{ steps.plan.outputs.queue_buffer_cap }}
+      offset: ${{ steps.plan.outputs.offset }}
+      next_offset: ${{ steps.plan.outputs.next_offset }}
+      has_more: ${{ steps.plan.outputs.has_more }}
+      total_work_units: ${{ steps.plan.outputs.total_work_units }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Contract tests
+        run: |
+          node --test cerebro/tests/enterprise-global-fanout-v1.test.mjs
+          node --test cerebro/tests/enterprise-global-autostart-v1.test.mjs
+          node --test cerebro/tests/mission-fact001-scaffold-bridge-v1.test.mjs
+          node --test cerebro/tests/mission-real-work-router-v1.test.mjs
+      - id: plan
+        env:
+          REQUESTED_UNITS: ${{ github.event_name == 'pull_request' && '20' || github.event_name == 'push' && '20' || inputs.units || '360' }}
+          REQUESTED_OFFSET: ${{ github.event_name == 'workflow_dispatch' && inputs.offset || '0' }}
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import { planEnterpriseGlobalFanoutV1 } from './cerebro/runtime/enterprise-global-fanout-v1.mjs';
+          const policy=JSON.parse(fs.readFileSync('./cerebro/config/github-enterprise-execution.v1.json','utf8'));
+          const plan=planEnterpriseGlobalFanoutV1({policy,requested_units:Number(process.env.REQUESTED_UNITS),offset:Number(process.env.REQUESTED_OFFSET)});
+          for (const [k,v] of Object.entries({matrix_a:JSON.stringify({include:plan.matrix_a}),matrix_b:JSON.stringify({include:plan.matrix_b}),matrix_a_count:plan.matrix_a_count,matrix_b_count:plan.matrix_b_count,planned_units:plan.planned_units,effective_cap:plan.effective_physical_cap,queue_buffer_cap:plan.queue_buffer_cap,offset:plan.offset,next_offset:plan.next_offset,has_more:plan.has_more,total_work_units:plan.total_work_units})) fs.appendFileSync(process.env.GITHUB_OUTPUT,`${k}=${v}\n`);
+          NODE
+
+  fanout-a:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    name: Global A · ${{ matrix.work_unit_id }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 180
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix_a) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Execute one finite unique Mission DAG unit
+        env:
+          LANE: ${{ matrix.lane }}
+          CYCLE: ${{ matrix.cycle }}
+          EXPECTED_WORK_UNIT_ID: ${{ matrix.work_unit_id }}
+          CEREBRO_MISSION_WORK_OUT_DIR: artifacts/enterprise-global-fanout-v1
+          CEREBRO_MISSION_FACT001_OUT_DIR: artifacts/mission-fact001-scaffold-v1
+        run: |
+          result="$(node cerebro/runtime/mission-real-work-router-v1.mjs --lane="$LANE" --cycle="$CYCLE" --fallback=true)"
+          RESULT_JSON="$result" node --input-type=module <<'NODE'
+          const result=JSON.parse(String(process.env.RESULT_JSON).trim().split(/\r?\n/).at(-1));
+          if(!result.ok||result.work_unit_id!==process.env.EXPECTED_WORK_UNIT_ID)throw new Error('GLOBAL_FANOUT_WORK_FAILED');
+          NODE
+
+  fanout-b:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    name: Global B · ${{ matrix.work_unit_id }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 180
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix_b) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Execute one finite unique Mission DAG unit
+        env:
+          LANE: ${{ matrix.lane }}
+          CYCLE: ${{ matrix.cycle }}
+          EXPECTED_WORK_UNIT_ID: ${{ matrix.work_unit_id }}
+          CEREBRO_MISSION_WORK_OUT_DIR: artifacts/enterprise-global-fanout-v1
+          CEREBRO_MISSION_FACT001_OUT_DIR: artifacts/mission-fact001-scaffold-v1
+        run: |
+          result="$(node cerebro/runtime/mission-real-work-router-v1.mjs --lane="$LANE" --cycle="$CYCLE" --fallback=true)"
+          RESULT_JSON="$result" node --input-type=module <<'NODE'
+          const result=JSON.parse(String(process.env.RESULT_JSON).trim().split(/\r?\n/).at(-1));
+          if(!result.ok||result.work_unit_id!==process.env.EXPECTED_WORK_UNIT_ID)throw new Error('GLOBAL_FANOUT_WORK_FAILED');
+          NODE
+
+  acceptance:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    name: Global fanout V1 acceptance
+    needs: [plan, fanout-a, fanout-b]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          echo 'CEREBRO Enterprise Global Fanout V1 GREEN'
+          echo 'planned_units=${{ needs.plan.outputs.planned_units }}'
+          echo 'effective_physical_cap=${{ needs.plan.outputs.effective_cap }}'
+          echo 'queue_buffer_cap=${{ needs.plan.outputs.queue_buffer_cap }}'
+          echo 'live_cap=360'
+          echo 'global_capacity_controller_is_primary_admission_owner=true'
+          echo 'automatic_heavy_fanout=false'
+          echo 'second_queue=false'
+          echo 'second_scheduler=false'
+          echo 'second_daemon=false'
+          echo 'prod_authorized=false'
+          echo 'trading_access=false'
+      - name: Self-refill next non-overlapping buffered wave
+        if: ${{ github.event_name == 'workflow_dispatch' && needs.plan.outputs.has_more == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT_OFFSET: ${{ needs.plan.outputs.next_offset }}
+          QUEUE_BUFFER_CAP: ${{ needs.plan.outputs.queue_buffer_cap }}
+        run: |
+          gh api --method POST "/repos/${GITHUB_REPOSITORY}/actions/workflows/cerebro-enterprise-global-fanout-v1.yml/dispatches" \
+            -f "ref=${GITHUB_REF_NAME}" \
+            -f "inputs[units]=${QUEUE_BUFFER_CAP}" \
+            -f "inputs[offset]=${NEXT_OFFSET}"
+          echo "physical_cap=360" >> "$GITHUB_STEP_SUMMARY"

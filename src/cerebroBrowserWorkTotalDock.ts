@@ -9,7 +9,9 @@ type WorkProfile={
 type ProfilesResponse={ok:boolean;company_id?:string;profiles?:WorkProfile[];error?:string};
 type ActionResponse={ok:boolean;error?:string;state?:string;verification_state?:string;account_hint?:string;session?:{session_id:string};active_session?:{session_id:string;state:string};target_browser_profile_id?:string};
 
-const OWNER='cerebro-browser-work-total-owner-v1-preprod';
+const ENVIRONMENT=IS_PRODUCTION?'PROD':'PREPROD';
+const OWNER=IS_PRODUCTION?'cerebro-browser-work-total-owner-v1-prod':'cerebro-browser-work-total-owner-v1-preprod';
+const IDEMPOTENCY_PREFIX=IS_PRODUCTION?'browser-work-total-v1-prod-ui-':'browser-work-total-v1-ui-';
 const ROOT_ID='cerebro-browser-work-total-profile-dock';
 const STYLE_ID='cerebro-browser-work-total-profile-style';
 const TERMINAL=new Set(['HIBERNATED','STOPPED','ERROR','CLOSED']);
@@ -36,7 +38,7 @@ function currentCompany(){
 }
 async function api<T extends {ok:boolean;error?:string}>(route:string,body:Record<string,unknown>):Promise<T>{
  const {data:{session}}=await supabase.auth.getSession();
- if(!session?.access_token)throw new Error('PREPROD_AUTH_REQUIRED');
+ if(!session?.access_token)throw new Error(`${ENVIRONMENT}_AUTH_REQUIRED`);
  const response=await fetch(`${SUPABASE_URL}/functions/v1/${OWNER}/${route}`,{method:'POST',headers:{'content-type':'application/json',Authorization:`Bearer ${session.access_token}`,apikey:SUPABASE_PUBLISHABLE_KEY},body:JSON.stringify(body)});
  const data=await response.json().catch(()=>null) as T|null;
  if(!response.ok||!data?.ok)throw new Error(data?.error||`WORK_TOTAL_${route.toUpperCase()}_${response.status}`);
@@ -66,7 +68,7 @@ function render(){
  const root=document.getElementById(ROOT_ID);if(!root)return;
  const profile=selected();const current=active();const pending=profile?.verification_state==='PENDING_CONFIRMATION';
  root.innerHTML=`
-  <div class="wt-main"><span class="wt-badge">WORK TOTAL · PREPROD</span><select aria-label="Perfil Work Total" ${busy?'disabled':''}>${profiles.length?profiles.map(p=>`<option value="${escapeHtml(keyOf(p))}" ${keyOf(p)===selectedKey?'selected':''}>${escapeHtml(p.display_label)} · ${escapeHtml(p.state)}</option>`).join(''):'<option value="">Sin perfiles autorizados</option>'}</select></div>
+  <div class="wt-main"><span class="wt-badge">WORK TOTAL · ${ENVIRONMENT}</span><select aria-label="Perfil Work Total" ${busy?'disabled':''}>${profiles.length?profiles.map(p=>`<option value="${escapeHtml(keyOf(p))}" ${keyOf(p)===selectedKey?'selected':''}>${escapeHtml(p.display_label)} · ${escapeHtml(p.state)}</option>`).join(''):'<option value="">Sin perfiles autorizados</option>'}</select></div>
   <div class="wt-state"><span>PERFIL / IDENTIDAD</span><strong>${profile?`${escapeHtml(profile.provider.toUpperCase())} · ${escapeHtml(profile.verification_state)}${profile.verified_account_hint?` · ${escapeHtml(profile.verified_account_hint)}`:''}`:'Esperando catálogo'}</strong><span>${current?.active_session?`Activa ${escapeHtml(short(current.active_session.session_id))} · ${escapeHtml(current.active_session.state)}`:profile?.has_session_bundle?'Sesión dormida disponible':'Sin sesión persistida'}</span></div>
   <div class="wt-actions">
    <button type="button" data-action="open" data-kind="primary" ${busy||!profile?'disabled':''}>${profile?.has_session_bundle?'Reanudar':'Abrir'}</button>
@@ -75,13 +77,12 @@ function render(){
    <button type="button" data-action="forget" data-kind="danger" ${busy||!profile?.has_session_bundle||Boolean(profile?.active_session)?'disabled':''}>Olvidar sesión</button>
    <button type="button" data-action="refresh" ${busy?'disabled':''}>Actualizar</button>
   </div>
-  <div class="wt-message ${error?'is-error':''}">${escapeHtml(error||info||'Perfiles aislados · sesión cifrada · 0 € adicional · PROD intacto')}</div>`;
+  <div class="wt-message ${error?'is-error':''}">${escapeHtml(error||info||`Perfiles aislados · sesión cifrada · 0 € adicional · ${ENVIRONMENT} gobernado`)}</div>`;
  const select=root.querySelector<HTMLSelectElement>('select[aria-label="Perfil Work Total"]');
  select?.addEventListener('change',()=>{selectedKey=select.value;error='';info='';render();});
  root.querySelectorAll<HTMLButtonElement>('button[data-action]').forEach(button=>button.addEventListener('click',()=>{void act(button.dataset.action||'');}));
 }
 async function refresh(){
- if(IS_PRODUCTION)return;
  const nextCompany=currentCompany();if(nextCompany!==company){company=nextCompany;selectedKey='';}
  try{const data=await api<ProfilesResponse>('profiles',{company_id:company});profiles=Array.isArray(data.profiles)?data.profiles:[];if(!selectedKey||!profiles.some(p=>keyOf(p)===selectedKey))selectedKey=profiles[0]?keyOf(profiles[0]):'';error='';}catch(cause){error=String((cause as Error)?.message||cause);profiles=[];}render();
 }
@@ -99,7 +100,7 @@ async function act(action:string){
   }else if(action==='open'){
    const current=active();
    if(current?.active_session&&current.browser_profile_id!==profile!.browser_profile_id){await api<ActionResponse>('hibernate',{company_id:company,session_id:current.active_session.session_id,target_browser_profile_id:profile!.browser_profile_id});info=`Durmiendo ${current.display_label}…`;render();await waitForSleep(current.active_session.session_id);}
-   const start=await api<ActionResponse>('start',{company_id:company,identity_id:profile!.identity_id,account_id:profile!.account_id,idempotency_key:`work-total-ui-${crypto.randomUUID()}`});info=start.session?.session_id?`Workspace iniciado ${short(start.session.session_id)}.`:'Workspace reanudado.';
+   const start=await api<ActionResponse>('start',{company_id:company,identity_id:profile!.identity_id,account_id:profile!.account_id,idempotency_key:`${IDEMPOTENCY_PREFIX}${crypto.randomUUID()}`});const id=start.session?.session_id||start.active_session?.session_id;if(id)window.dispatchEvent(new CustomEvent('cerebro:browser-session-selected',{detail:id}));info=start.session?.session_id?`Workspace iniciado ${short(start.session.session_id)}.`:'Workspace reanudado.';
   }else if(action==='confirm'){
    const result=await api<ActionResponse>('confirm-account',{company_id:company,identity_id:profile!.identity_id,account_id:profile!.account_id});info=`Cuenta confirmada${result.account_hint?` · ${result.account_hint}`:''}.`;
   }else if(action==='forget'){
@@ -108,13 +109,13 @@ async function act(action:string){
  }catch(cause){error=String((cause as Error)?.message||cause);}finally{busy=false;await refresh();render();}
 }
 function mount(){
- if(IS_PRODUCTION||typeof document==='undefined')return;
+ if(typeof document==='undefined')return;
  installStyle();const sessionbar=document.querySelector<HTMLElement>('.cerebro-browser-console .cerebro-browser-sessionbar');
  if(!sessionbar){mounted=false;return;}
- let root=document.getElementById(ROOT_ID);if(!root){root=document.createElement('div');root.id=ROOT_ID;root.setAttribute('aria-label','Perfiles Work Total');sessionbar.appendChild(root);}mounted=true;render();void refresh();
+ let root=document.getElementById(ROOT_ID);if(!root){root=document.createElement('div');root.id=ROOT_ID;root.setAttribute('aria-label',`Perfiles Work Total ${ENVIRONMENT}`);sessionbar.appendChild(root);}mounted=true;render();void refresh();
 }
 function install(){
- if(IS_PRODUCTION||typeof document==='undefined'||typeof window==='undefined')return;
+ if(typeof document==='undefined'||typeof window==='undefined')return;
  const observer=new MutationObserver(()=>{if(!mounted||!document.getElementById(ROOT_ID))mount();});observer.observe(document.body,{childList:true,subtree:true});
  mount();interval=window.setInterval(()=>{if(document.getElementById(ROOT_ID))void refresh();else mount();},2500);
  window.addEventListener('beforeunload',()=>{window.clearInterval(interval);observer.disconnect();},{once:true});
